@@ -1,0 +1,144 @@
+import time
+import json
+import pandas as pd
+from bs4 import BeautifulSoup
+
+# Selenium imports
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+
+def setup_driver():
+    options = Options()
+    # Manteniamo il browser visibile per gestire eventuali blocchi/CAP manualmente
+    options.add_argument("window-size=1920,1080")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=options)
+
+def scrape_carrefour_completo(url):
+    driver = setup_driver()
+    prodotti_lista = []
+    
+    try:
+        print(f"🚀 Apertura pagina: {url}")
+        driver.get(url)
+        wait = WebDriverWait(driver, 20)
+
+        # 1. Gestione Cookie
+        try:
+            btn_cookie = wait.until(EC.element_to_be_clickable((By.ID, "onetrust-accept-btn-handler")))
+            btn_cookie.click()
+            print("🍪 Cookie accettati.")
+            time.sleep(2)
+        except:
+            print("⚠️ Banner cookie non rilevato.")
+
+        # 2. Controllo Interattivo (CAP / Store Selection)
+        print("⏳ Attesa caricamento prodotti... Se vedi il pop-up del CAP, inseriscilo nel browser!")
+        try:
+            # Aspetta che appaia almeno un articolo prima di procedere
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "article.product.tile")))
+            print("✅ Prodotti rilevati correttamente.")
+        except:
+            print("🕒 Timeout: non vedo prodotti. Hai inserito il CAP? Aspetto altri 10 secondi...")
+            time.sleep(10)
+
+        # 3. Infinite Scroll (Scorre per caricare tutto il catalogo)
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        print("🖱️ Inizio scrolling per caricare tutti i prodotti...")
+        
+        while True:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(4) # Tempo per il caricamento dei nuovi prodotti (AJAX)
+            
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            prodotti_attuali = len(driver.find_elements(By.CSS_SELECTOR, "article.product.tile"))
+            print(f"📦 Prodotti caricati finora: {prodotti_attuali}", end="\r")
+            
+            if new_height == last_height:
+                break
+            last_height = new_height
+
+        # 4. Parsing con BeautifulSoup
+        print("\n🔍 Estrazione dati dettagliata in corso...")
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        tiles = soup.select('article.product.tile')
+
+        for tile in tiles:
+            try:
+                # Estrazione dati dal JSON embedded (molto affidabile)
+                json_raw = tile.get('data-product-json')
+                js_data = json.loads(json_raw) if json_raw else {}
+
+                # --- NOME E BRAND ---
+                brand = tile.select_one('span.brand').text.strip() if tile.select_one('span.brand') else ""
+                nome = tile.select_one('span.tile-description').text.strip() if tile.select_one('span.tile-description') else js_data.get('name', 'N/A')
+                
+                # --- LOGICA PREZZI (SCONTATI E ORIGINALI) ---
+                # Prezzo ATTUALE (quello grande, rosso se scontato)
+                prezzo_attuale_str = "N/A"
+                attuale_element = tile.select_one('span.value')
+                if attuale_element:
+                    prezzo_attuale_str = attuale_element.text.strip()
+
+                # Prezzo ORIGINALE (cerca il testo barrato)
+                # Carrefour usa solitamente .strike-through o span.price-standard
+                prezzo_originale_str = ""
+                originale_element = tile.select_one('.strike-through, del, .price-standard, .cut-price')
+                
+                if originale_element:
+                    prezzo_originale_str = originale_element.text.strip()
+                else:
+                    # Se non c'è il prezzo barrato, il prezzo originale è quello attuale
+                    prezzo_originale_str = prezzo_attuale_str
+
+                # --- SCONTO E UNITÀ ---
+                percentuale_sconto = "0%"
+                badge = tile.select_one('.discount-badge, .discount-percentage, .promotion-badge')
+                if badge:
+                    percentuale_sconto = badge.text.strip()
+                
+                prezzo_unita = tile.select_one('span.unit-price').text.strip() if tile.select_one('span.unit-price') else "N/A"
+
+                prodotti_lista.append({
+                    "Marca": brand,
+                    "Prodotto": nome,
+                    "Prezzo Scontato": prezzo_attuale_str,
+                    "Prezzo Originale": prezzo_originale_str,
+                    "Sconto (%)": percentuale_sconto,
+                    "Prezzo Unitario": prezzo_unita,
+                    "ID": js_data.get('id', 'N/A')
+                })
+            except Exception as e:
+                continue
+
+    finally:
+        driver.quit()
+        print("🔌 Browser chiuso.")
+
+    return prodotti_lista
+
+# --- AVVIO SCRAPER ---
+if __name__ == "__main__":
+    url_target = "https://www.carrefour.it/spesa-online/frutta-e-verdura/"
+    risultati = scrape_carrefour_completo(url_target)
+
+    if risultati:
+        df = pd.DataFrame(risultati)
+        # Rimuove eventuali duplicati per ID
+        df.drop_duplicates(subset=['ID'], inplace=True)
+        
+        # Salvataggio in CSV ottimizzato per Excel (tabulazione e UTF-16)
+        nome_file = "catalogo_carrefour_prezzi.csv"
+        df.to_csv(nome_file, index=False, encoding='utf-16', sep='\t')
+        
+        print(f"\n✨ FINITO!")
+        print(f"📊 Totale prodotti estratti: {len(df)}")
+        print(f"💾 Dati salvati in: {nome_file}")
+    else:
+        print("❌ Nessun dato trovato. Controlla la connessione o i selettori.")
