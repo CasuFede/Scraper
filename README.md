@@ -1,4 +1,3 @@
-# librerie da installare
 pip install playwright
 playwright install chromium
 
@@ -7,3 +6,5 @@ playwright install chromium
 
 pip install playwright playwright-stealth pandas fake-useragent
 playwright install chromium
+
+pip install selenium webdriver-manager beautifulsoup4 pandas
